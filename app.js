@@ -1,33 +1,80 @@
-// app.js - Unified Multi-Device NAS Frontend Controller
+// app.js - Unified Multi-Device NAS Frontend Controller with Cryptographic Central Registry
 
 // Application State
 let state = {
-    devices: JSON.parse(localStorage.getItem('nas_devices')) || [],
-    activeDeviceId: localStorage.getItem('nas_active_device_id') || '',
-    resolvedUrl: '',
+    devices: [],             // Decrypted drive list: [{ id, name, apiToken, serverUrlOverride }]
+    activeDeviceId: '',
+    resolvedUrl: '',         // Base Cloudflare URL for active session
     files: [],
-    activeTab: 'dashboard', // dashboard, all, images, videos, documents, audit, settings
-    diskInfo: null,
-    devicesStatus: {} // caches status of all devices: { deviceId: { status: 'checking/online/offline', message: '...', storage: obj, url: '...' } }
+    activeTab: 'dashboard',  // dashboard, all, images, videos, documents, audit, settings
+    diskInfo: null,          // Holds full multi-drive status payload from server
+    devicesStatus: {},       // Maps driveId to state: { id: { status, message, storage, url } }
+    
+    // Centralized Authentication Registry credentials
+    username: '',
+    githubPat: '',
+    gistId: '',
+    derivedKey: null         // AES key derived from Master Password
 };
 
-// Check for legacy single-device configuration and auto-migrate
-const oldGist = localStorage.getItem('nas_gist_id');
-const oldToken = localStorage.getItem('nas_api_token');
-const oldUrl = localStorage.getItem('nas_server_url');
+// Cryptographic Encryption/Decryption Helpers (WebCrypto API)
+async function deriveKey(password, username) {
+    const enc = new TextEncoder();
+    const passwordKey = await crypto.subtle.importKey(
+        "raw",
+        enc.encode(password),
+        { name: "PBKDF2" },
+        false,
+        ["deriveKey"]
+    );
+    const salt = enc.encode(username.toLowerCase().trim());
+    return crypto.subtle.deriveKey(
+        {
+            name: "PBKDF2",
+            salt: salt,
+            iterations: 100000,
+            hash: "SHA-256"
+        },
+        passwordKey,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"]
+    );
+}
 
-if (state.devices.length === 0 && (oldGist || oldUrl)) {
-    const migratedDevice = {
-        id: 'device-' + Date.now(),
-        name: 'Vault-SD-Card',
-        gistId: oldGist || '',
-        apiToken: oldToken || 'secure-nas-passcode-12345',
-        serverUrlOverride: oldUrl || ''
-    };
-    state.devices = [migratedDevice];
-    state.activeDeviceId = migratedDevice.id;
-    localStorage.setItem('nas_devices', JSON.stringify(state.devices));
-    localStorage.setItem('nas_active_device_id', state.activeDeviceId);
+async function encryptData(plaintext, key) {
+    const enc = new TextEncoder();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encrypted = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: iv },
+        key,
+        enc.encode(plaintext)
+    );
+    const combined = new Uint8Array(iv.length + encrypted.byteLength);
+    combined.set(iv);
+    combined.set(new Uint8Array(encrypted), iv.length);
+    let binary = "";
+    for (let i = 0; i < combined.length; i++) {
+        binary += String.fromCharCode(combined[i]);
+    }
+    return btoa(binary);
+}
+
+async function decryptData(ciphertextBase64, key) {
+    const binary = atob(ciphertextBase64);
+    const combined = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        combined[i] = binary.charCodeAt(i);
+    }
+    const iv = combined.slice(0, 12);
+    const ciphertext = combined.slice(12);
+    const dec = new TextDecoder();
+    const decrypted = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: iv },
+        key,
+        ciphertext
+    );
+    return dec.decode(decrypted);
 }
 
 // DOM Elements
@@ -52,13 +99,21 @@ const activeDeviceSelect = document.getElementById('active-device-select');
 const statOnlineCount = document.getElementById('stat-online-count');
 const statTotalCount = document.getElementById('stat-total-count');
 
-// Setup Modal Elements
-const setupGistId = document.getElementById('setup-gist-id');
-const setupToken = document.getElementById('setup-token');
-const setupServerUrl = document.getElementById('setup-server-url');
-const btnSaveSetup = document.getElementById('btn-save-setup');
-const toggleAdvanced = document.getElementById('toggle-advanced');
-const advancedBody = document.getElementById('advanced-body');
+// Login/Register tabs & forms
+const tabLoginBtn = document.getElementById('tab-login-btn');
+const tabRegisterBtn = document.getElementById('tab-register-btn');
+const loginFormContainer = document.getElementById('login-form-container');
+const registerFormContainer = document.getElementById('register-form-container');
+
+// Forms fields
+const loginUsernameInput = document.getElementById('login-username');
+const loginPasswordInput = document.getElementById('login-password');
+const btnLoginAccount = document.getElementById('btn-login-account');
+
+const registerUsernameInput = document.getElementById('register-username');
+const registerPasswordInput = document.getElementById('register-password');
+const registerPatInput = document.getElementById('register-pat');
+const btnRegisterAccount = document.getElementById('btn-register-account');
 
 // Image Modal Elements
 const imageModal = document.getElementById('image-modal');
@@ -74,7 +129,7 @@ const videoTitle = document.getElementById('video-title');
 const videoDownload = document.getElementById('video-download');
 const videoModalClose = document.getElementById('video-modal-close');
 
-// Initialize Lucide Icons
+// Initialize Icons Helper
 function initIcons() {
     if (window.lucide) {
         window.lucide.createIcons();
@@ -91,11 +146,10 @@ function formatBytes(bytes, decimals = 2) {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
-// Update connection status UI
+// Update connection status UI badge
 function updateStatus(status) {
     const dot = statusIndicator.querySelector('.status-dot');
     const text = statusIndicator.querySelector('.status-text');
-    
     dot.className = 'status-dot';
     
     if (status === 'connected') {
@@ -103,43 +157,14 @@ function updateStatus(status) {
         text.textContent = 'Connected';
     } else if (status === 'syncing') {
         dot.classList.add('syncing');
-        text.textContent = 'Resolving URL';
+        text.textContent = 'Decrypting Profile';
     } else {
         dot.classList.add('disconnected');
         text.textContent = 'Disconnected';
     }
 }
 
-// Resolve Server URL via Gist or Override
-async function resolveDeviceUrl(device) {
-    if (device.serverUrlOverride) {
-        return device.serverUrlOverride;
-    }
-    
-    if (!device.gistId) {
-        throw new Error("Gist ID not configured");
-    }
-    
-    // Add cache buster to prevent stale API responses
-    const response = await fetch(`https://api.github.com/gists/${device.gistId}?t=${Date.now()}`);
-    if (!response.ok) {
-        throw new Error(`Gist lookup failed: ${response.statusText}`);
-    }
-    
-    const gistData = await response.json();
-    if (!gistData.files || !gistData.files['nas_url.json']) {
-        throw new Error("nas_url.json not found in Gist");
-    }
-    
-    const content = JSON.parse(gistData.files['nas_url.json'].content);
-    if (!content.url) {
-        throw new Error("No URL entry inside Gist");
-    }
-    
-    return content.url;
-}
-
-// Show a specific state element and hide others
+// Show specific state panel and hide others
 function showState(elementToShow) {
     loadingState.classList.add('hidden');
     emptyState.classList.add('hidden');
@@ -151,79 +176,401 @@ function showState(elementToShow) {
     elementToShow.classList.remove('hidden');
 }
 
-// Display Configuration Entry Screen
+// Display Configuration Login Screen
 function showSetupScreen() {
     showState(setupState);
-    setupGistId.value = '';
-    setupToken.value = '';
-    setupServerUrl.value = '';
     updateStatus('disconnected');
     diskBadge.classList.add('hidden');
     headerDeviceSwitcher.classList.add('hidden');
 }
 
-// Ping all registered devices to check status and storage
+// Toggle setup screen forms
+tabLoginBtn.onclick = () => {
+    tabLoginBtn.classList.add('active');
+    tabRegisterBtn.classList.remove('active');
+    loginFormContainer.style.display = 'flex';
+    registerFormContainer.classList.add('hidden');
+    registerFormContainer.style.display = 'none';
+};
+
+tabRegisterBtn.onclick = () => {
+    tabRegisterBtn.classList.add('active');
+    tabLoginBtn.classList.remove('active');
+    registerFormContainer.classList.remove('hidden');
+    registerFormContainer.style.display = 'flex';
+    loginFormContainer.style.display = 'none';
+};
+
+// Account Registration Logic
+async function registerAccount() {
+    const username = registerUsernameInput.value.trim();
+    const password = registerPasswordInput.value.trim();
+    const pat = registerPatInput.value.trim();
+    
+    if (!username || !password || !pat) {
+        alert("Please fill in all fields to create your account registry.");
+        return;
+    }
+    
+    showState(loadingState);
+    updateStatus('syncing');
+    
+    try {
+        // Derive key
+        const derivedKey = await deriveKey(password, username);
+        
+        // Initialize an empty registry payload
+        const emptyRegistry = {
+            github_pat: pat,
+            drives: []
+        };
+        const ciphertext = await encryptData(JSON.stringify(emptyRegistry), derivedKey);
+        
+        // Push initial Registry Gist to GitHub
+        const payload = {
+            description: "Pocket NAS Registry",
+            public: true, // Publicly readable so login works anywhere without PAT; encrypted contents keep it secure
+            files: {
+                "registry.json.enc": {
+                    "content": ciphertext
+                },
+                "drives_status.json": {
+                    "content": JSON.stringify({ url: "", updated_at: "", drives: {} })
+                }
+            }
+        };
+        
+        const response = await fetch("https://api.github.com/gists", {
+            method: "POST",
+            headers: {
+                "Authorization": `token ${pat}`,
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+            throw new Error(`GitHub Gist creation failed: ${response.statusText}`);
+        }
+        
+        const gistData = await response.json();
+        alert("Encrypted Account Registry successfully initialized on your GitHub profile!");
+        
+        // Save session state
+        state.username = username;
+        state.gistId = gistData.id;
+        state.githubPat = pat;
+        state.derivedKey = derivedKey;
+        state.devices = [];
+        
+        sessionStorage.setItem('nas_session', JSON.stringify({
+            username: username,
+            password: password,
+            gistId: gistData.id
+        }));
+        
+        // Proceed to dashboard
+        state.activeTab = 'dashboard';
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.classList.remove('active');
+            if (item.getAttribute('data-tab') === 'dashboard') item.classList.add('active');
+        });
+        
+        pingDevices();
+    } catch (e) {
+        console.error(e);
+        alert(`Failed to initialize account: ${e.message}`);
+        showSetupScreen();
+    }
+}
+
+// Account Login Logic (Model B)
+async function loginAccount(username, password) {
+    showState(loadingState);
+    updateStatus('syncing');
+    
+    try {
+        // 1. Fetch user public gists to locate the Registry
+        const response = await fetch(`https://api.github.com/users/${username}/gists?t=${Date.now()}`);
+        if (!response.ok) {
+            throw new Error(`Could not locate GitHub profile: ${response.statusText}`);
+        }
+        const gists = await response.json();
+        
+        // 2. Find Gist containing registry.json.enc
+        let gistId = null;
+        let encryptedContent = null;
+        let drivesStatusContent = null;
+        
+        for (const gist of gists) {
+            if (gist.files && gist.files['registry.json.enc']) {
+                gistId = gist.id;
+                break;
+            }
+        }
+        
+        if (!gistId) {
+            throw new Error("No Pocket NAS profile registry found on this GitHub account. Please Create an Account first.");
+        }
+        
+        // 3. Fetch Gist payload details
+        const gistResponse = await fetch(`https://api.github.com/gists/${gistId}?t=${Date.now()}`);
+        if (!gistResponse.ok) {
+            throw new Error(`Failed to fetch Gist profile: ${gistResponse.statusText}`);
+        }
+        const gistDetails = await gistResponse.json();
+        encryptedContent = gistDetails.files['registry.json.enc'].content;
+        
+        if (gistDetails.files['drives_status.json']) {
+            try {
+                drivesStatusContent = JSON.parse(gistDetails.files['drives_status.json'].content);
+            } catch (err) {
+                console.warn("drives_status.json empty or corrupted");
+            }
+        }
+        
+        // 4. Derive key and decrypt registry
+        const derivedKey = await deriveKey(password, username);
+        let decryptedData = "";
+        try {
+            decryptedData = await decryptData(encryptedContent, derivedKey);
+        } catch (decErr) {
+            throw new Error("Authentication failed: Incorrect password.");
+        }
+        
+        const registry = JSON.parse(decryptedData);
+        
+        // 5. Populate global state
+        state.username = username;
+        state.gistId = gistId;
+        state.githubPat = registry.github_pat;
+        state.derivedKey = derivedKey;
+        state.devices = registry.drives || [];
+        
+        if (drivesStatusContent) {
+            state.resolvedUrl = drivesStatusContent.url || '';
+        }
+        
+        if (state.devices.length > 0 && !state.activeDeviceId) {
+            state.activeDeviceId = state.devices[0].id;
+        }
+        
+        sessionStorage.setItem('nas_session', JSON.stringify({
+            username: username,
+            password: password,
+            gistId: gistId
+        }));
+        
+        // 6. Go to dashboard
+        state.activeTab = 'dashboard';
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.classList.remove('active');
+            if (item.getAttribute('data-tab') === 'dashboard') item.classList.add('active');
+        });
+        
+        pingDevices();
+    } catch (e) {
+        console.error(e);
+        alert(e.message);
+        showSetupScreen();
+    }
+}
+
+// Push updated registry to Gist
+async function saveRegistryOnGist() {
+    if (!state.gistId || !state.githubPat || !state.derivedKey) return;
+    
+    try {
+        const payloadJson = JSON.stringify({
+            github_pat: state.githubPat,
+            drives: state.devices
+        });
+        const ciphertext = await encryptData(payloadJson, state.derivedKey);
+        
+        const response = await fetch(`https://api.github.com/gists/${state.gistId}`, {
+            method: "PATCH",
+            headers: {
+                "Authorization": `token ${state.githubPat}`,
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                files: {
+                    "registry.json.enc": {
+                        "content": ciphertext
+                    }
+                }
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Gist update failed: ${response.statusText}`);
+        }
+        console.log("Registry Gist successfully updated!");
+    } catch (e) {
+        console.error("Failed to save registry to Gist:", e);
+        alert("Failed to sync changes to GitHub. Please check network connection.");
+    }
+}
+
+// Ping central PC backend and fetch statuses of all drives in parallel
 async function pingDevices() {
-    if (state.devices.length === 0) {
+    if (!state.gistId) {
         showSetupScreen();
         return;
     }
     
     state.devicesStatus = {};
-    renderDashboard(); // Show connecting statuses immediately
+    renderDashboard(); // Show connecting placeholder immediately
     
-    const promises = state.devices.map(async (device) => {
-        try {
-            const url = await resolveDeviceUrl(device);
-            const cleanUrl = url.endsWith('/') ? url.slice(0, -1) : url;
-            state.devicesStatus[device.id] = { status: 'checking', message: 'Checking API...', storage: null, url: cleanUrl };
-            
-            // Test connection
-            const response = await fetch(`${cleanUrl}/api/disk/status`, {
-                headers: { 'Authorization': `Bearer ${device.apiToken}` }
+    try {
+        // 1. Fetch drives_status.json from Gist to check latest Cloudflare URL
+        const gistResponse = await fetch(`https://api.github.com/gists/${state.gistId}?t=${Date.now()}`, {
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!gistResponse.ok) throw new Error("Gist lookup failed");
+        
+        const gistData = await gistResponse.json();
+        let serverUrl = '';
+        let serverDriveStatuses = {};
+        
+        if (gistData.files && gistData.files['drives_status.json']) {
+            const statusContent = JSON.parse(gistData.files['drives_status.json'].content);
+            serverUrl = statusContent.url || '';
+            serverDriveStatuses = statusContent.drives || {};
+        }
+        
+        state.resolvedUrl = serverUrl;
+        
+        if (!serverUrl) {
+            // No tunnel URL stored on Gist, meaning PC service is offline
+            state.devices.forEach(device => {
+                state.devicesStatus[device.id] = {
+                    status: 'offline',
+                    message: 'Offline (Tunnel Closed)',
+                    storage: null,
+                    url: ''
+                };
             });
-            
-            if (response.status === 401) {
-                throw new Error("Unauthorized");
+            updateStatus('disconnected');
+            diskBadge.classList.add('hidden');
+            renderDashboard();
+            updateHeaderSwitcher();
+            return;
+        }
+        
+        // 2. Fetch full multi-drive status info in a single request to PC server
+        const cleanUrl = serverUrl.endsWith('/') ? serverUrl.slice(0, -1) : serverUrl;
+        
+        // We use the api token from any active configured drive to authorize status query
+        const activeDev = state.devices.find(d => d.id === state.activeDeviceId) || state.devices[0];
+        const authHeader = activeDev ? activeDev.apiToken : 'secure-nas-passcode-12345';
+        
+        // 2a. Warm up the Cloudflare tunnel with a no-auth /ping first.
+        // Cloudflare quick tunnels show an HTML interstitial to browsers
+        // on the FIRST request. The Accept: application/json header signals
+        // this is an API call and bypasses the challenge.
+        try {
+            await fetch(`${cleanUrl}/ping`, {
+                headers: { 'Accept': 'application/json' },
+                signal: AbortSignal.timeout(8000)
+            });
+        } catch (pingErr) {
+            // /ping warmup failure is non-fatal; proceed to main request
+            console.warn('[Ping] Tunnel warmup failed:', pingErr.message);
+        }
+        
+        let serverResponse;
+        try {
+            serverResponse = await fetch(`${cleanUrl}/api/disk/status`, {
+                headers: { 
+                    'Authorization': `Bearer ${authHeader}`,
+                    'Accept': 'application/json'
+                },
+                signal: AbortSignal.timeout(12000)
+            });
+        } catch (netErr) {
+            throw new Error("offline");
+        }
+        
+        if (!serverResponse.ok) {
+            throw new Error("offline");
+        }
+        
+        // Detect Cloudflare HTML challenge page served as 200 OK
+        const contentType = serverResponse.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+            // Got HTML challenge page — tunnel needs browser activation
+            const challengeUrl = cleanUrl;
+            state.devices.forEach(device => {
+                state.devicesStatus[device.id] = {
+                    status: 'challenge',
+                    message: 'Activate Tunnel',
+                    storage: null,
+                    url: challengeUrl
+                };
+            });
+            updateStatus('disconnected');
+            diskBadge.classList.add('hidden');
+            renderDashboard();
+            updateHeaderSwitcher();
+            return;
+        }
+        
+        state.diskInfo = await serverResponse.json(); // returns {"drives": { id: { name, status, storage, audit_log, path } }}
+        
+        // 3. Populate devicesStatus maps
+        state.devices.forEach(device => {
+            const devData = state.diskInfo.drives[device.id];
+            if (devData && devData.status === 'online') {
+                state.devicesStatus[device.id] = {
+                    status: 'online',
+                    message: 'Online',
+                    storage: devData.storage,
+                    url: cleanUrl
+                };
+                
+                if (device.id === state.activeDeviceId) {
+                    diskBadgeName.textContent = devData.name;
+                    diskBadge.classList.remove('hidden');
+                    updateStatus('connected');
+                }
+            } else {
+                state.devicesStatus[device.id] = {
+                    status: 'offline',
+                    message: devData ? 'Offline' : 'Not Connected to PC',
+                    storage: null,
+                    url: ''
+                };
+                
+                if (device.id === state.activeDeviceId) {
+                    diskBadge.classList.add('hidden');
+                    updateStatus('disconnected');
+                }
             }
-            if (!response.ok) {
-                throw new Error(`Error: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            state.devicesStatus[device.id] = {
-                status: 'online',
-                message: 'Online',
-                storage: data.storage,
-                url: cleanUrl
-            };
-            
-            if (device.id === state.activeDeviceId) {
-                state.diskInfo = data;
-                diskBadgeName.textContent = data.disk_name;
-                diskBadge.classList.remove('hidden');
-                updateStatus('connected');
-            }
-        } catch (e) {
+        });
+        
+    } catch (e) {
+        // Central server offline
+        console.warn("Central server connection offline:", e);
+        state.devices.forEach(device => {
             state.devicesStatus[device.id] = {
                 status: 'offline',
-                message: e.message === 'Failed to fetch' ? 'Offline' : (e.message || 'Offline'),
+                message: 'Offline (PC Service Stopped)',
                 storage: null,
                 url: ''
             };
-            if (device.id === state.activeDeviceId) {
-                updateStatus('disconnected');
-                diskBadge.classList.add('hidden');
-            }
-        }
-    });
+        });
+        updateStatus('disconnected');
+        diskBadge.classList.add('hidden');
+    }
     
-    await Promise.allSettled(promises);
     renderDashboard();
     updateHeaderSwitcher();
 }
 
-// Render the dashboard grid view
+// Render Dashboard Grid Card
 function renderDashboard() {
     tabTitle.textContent = "Dashboard";
     tabSubtitle.textContent = "Overview of your pocket NAS network";
@@ -259,18 +606,25 @@ function renderDashboard() {
                 <div class="spinner" style="width: 20px; height: 20px; border-width: 2px; margin: 0 0 0.5rem 0;"></div>
                 <p class="text-secondary" style="font-size: 0.85rem; display:inline; margin-left:0.5rem;">Connecting to drive...</p>
             `;
+        } else if (info.status === 'challenge') {
+            storageHtml = `<p class="text-secondary" style="font-size: 0.85rem; margin-top:0.25rem; color: #f59e0b;">⚠️ Cloudflare tunnel needs one-time browser activation.</p>`;
         }
         
         let urlHtml = `<div class="card-url-section"><i data-lucide="link-2"></i><span>Disconnected</span></div>`;
-        if (info.url) {
+        if (info.url && info.status === 'online') {
             urlHtml = `<div class="card-url-section"><i data-lucide="link-2"></i><a href="${info.url}" target="_blank">${info.url}</a></div>`;
+        } else if (info.url && info.status === 'challenge') {
+            urlHtml = `<div class="card-url-section"><i data-lucide="link-2"></i><a href="${info.url}" target="_blank" style="color:#f59e0b;">${info.url}</a></div>`;
         }
+        
+        const isOnline = info.status === 'online';
+        const isChallenge = info.status === 'challenge';
         
         card.innerHTML = `
             <div class="card-header-status">
                 <h4>${device.name}</h4>
-                <span class="status-badge ${info.status}">
-                    <span class="status-dot ${info.status}"></span>
+                <span class="status-badge ${info.status === 'challenge' ? 'offline' : info.status}" style="${info.status === 'challenge' ? 'background:rgba(245,158,11,0.15);color:#f59e0b;border-color:rgba(245,158,11,0.3)' : ''}">
+                    <span class="status-dot ${info.status === 'challenge' ? 'offline' : info.status}"></span>
                     ${info.message}
                 </span>
             </div>
@@ -279,20 +633,26 @@ function renderDashboard() {
             </div>
             ${urlHtml}
             <div class="card-actions-row">
-                <button class="btn btn-primary btn-full browse-btn" data-id="${device.id}" ${info.status !== 'online' ? 'disabled' : ''}>
+                ${isChallenge ? `
+                <button class="btn btn-full activate-btn" data-id="${device.id}" data-url="${info.url}" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#000;font-weight:600;grid-column:1/-1;">
+                    <i data-lucide="external-link" style="width:14px;height:14px;"></i> Activate Tunnel — Click Here
+                </button>
+                ` : `
+                <button class="btn btn-primary btn-full browse-btn" data-id="${device.id}" ${!isOnline ? 'disabled' : ''}>
                     <i data-lucide="folder-open" style="width:14px;height:14px;"></i> Browse
                 </button>
-                <button class="btn btn-secondary btn-full audit-btn" data-id="${device.id}" ${info.status !== 'online' ? 'disabled' : ''}>
+                <button class="btn btn-secondary btn-full audit-btn" data-id="${device.id}" ${!isOnline ? 'disabled' : ''}>
                     <i data-lucide="activity" style="width:14px;height:14px;"></i> Logs
                 </button>
+                `}
             </div>
         `;
         
-        // Bind actions
         const browseBtn = card.querySelector('.browse-btn');
         const auditBtn = card.querySelector('.audit-btn');
+        const activateBtn = card.querySelector('.activate-btn');
         
-        if (info.status === 'online') {
+        if (isOnline) {
             browseBtn.onclick = (e) => {
                 e.stopPropagation();
                 setActiveDevice(device.id, 'all');
@@ -301,12 +661,22 @@ function renderDashboard() {
                 e.stopPropagation();
                 setActiveDevice(device.id, 'audit');
             };
+        } else if (isChallenge && activateBtn) {
+            activateBtn.onclick = (e) => {
+                e.stopPropagation();
+                // Open tunnel in new tab to satisfy CF challenge, then retry
+                window.open(activateBtn.dataset.url, '_blank');
+                setTimeout(() => {
+                    console.log('[Retry] Re-pinging after tunnel activation...');
+                    pingDevices();
+                }, 6000);
+            };
         }
         
         devicesDashboardGrid.appendChild(card);
     });
     
-    // Add Register card
+    // Add new drive registration card
     const addCard = document.createElement('div');
     addCard.className = 'add-device-card';
     addCard.innerHTML = `
@@ -329,12 +699,11 @@ function renderDashboard() {
     initIcons();
 }
 
-// Set active device and load files/logs
+// Switch active drive target
 function setActiveDevice(deviceId, targetTab) {
     state.activeDeviceId = deviceId;
-    localStorage.setItem('nas_active_device_id', deviceId);
-    
     state.activeTab = targetTab;
+    
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.remove('active');
         if (item.getAttribute('data-tab') === targetTab) item.classList.add('active');
@@ -343,7 +712,7 @@ function setActiveDevice(deviceId, targetTab) {
     fetchActiveDeviceFiles();
 }
 
-// Update the header select switcher dropdown
+// Update header switcher drop list
 function updateHeaderSwitcher() {
     if (state.activeTab === 'dashboard' || state.activeTab === 'settings' || state.devices.length === 0) {
         headerDeviceSwitcher.classList.add('hidden');
@@ -362,7 +731,7 @@ function updateHeaderSwitcher() {
     });
 }
 
-// Connect and fetch data for the active drive
+// Load media files indexing for the selected drive
 async function fetchActiveDeviceFiles() {
     const device = state.devices.find(d => d.id === state.activeDeviceId);
     if (!device) {
@@ -374,79 +743,54 @@ async function fetchActiveDeviceFiles() {
     updateStatus('syncing');
     
     try {
-        const url = await resolveDeviceUrl(device);
-        state.resolvedUrl = url.endsWith('/') ? url.slice(0, -1) : url;
+        if (!state.resolvedUrl) {
+            throw new Error("Connection URL not resolved. Verify PC backend service is running.");
+        }
         
-        // Load stats
-        const statusResponse = await fetch(`${state.resolvedUrl}/api/disk/status`, {
-            headers: { 'Authorization': `Bearer ${device.apiToken}` }
+        // Fetch files list for specific drive ID
+        const response = await fetch(`${state.resolvedUrl}/api/files?drive_id=${encodeURIComponent(device.id)}`, {
+            headers: { 
+                'Authorization': `Bearer ${device.apiToken}`,
+                'Accept': 'application/json'
+            }
         });
         
-        if (statusResponse.status === 401) {
-            throw new Error("Unauthorized: Invalid API Token");
+        if (response.status === 401) {
+            throw new Error("Unauthorized: Invalid API passcode for this drive.");
         }
-        if (!statusResponse.ok) {
-            throw new Error(`NAS server returned status: ${statusResponse.status}`);
-        }
-        
-        state.diskInfo = await statusResponse.json();
-        
-        // Update status badge
-        diskBadgeName.textContent = state.diskInfo.disk_name;
-        diskBadge.classList.remove('hidden');
-        
-        // Cache online state
-        state.devicesStatus[device.id] = {
-            status: 'online',
-            message: 'Online',
-            storage: state.diskInfo.storage,
-            url: state.resolvedUrl
-        };
-        
-        // Fetch files
-        const filesResponse = await fetch(`${state.resolvedUrl}/api/files`, {
-            headers: { 'Authorization': `Bearer ${device.apiToken}` }
-        });
-        
-        if (!filesResponse.ok) {
-            throw new Error("Failed to index files");
+        if (!response.ok) {
+            throw new Error(`NAS server returned status: ${response.status}`);
         }
         
-        const filesData = await filesResponse.json();
-        state.files = filesData.files || [];
+        const data = await response.json();
+        state.files = data.files || [];
+        
+        // Update storage and logs metadata
+        const statData = state.diskInfo.drives[device.id];
+        if (statData) {
+            state.diskInfo = {
+                disk_name: statData.name,
+                disk_id: device.id,
+                storage: statData.storage,
+                audit_log: statData.audit_log
+            };
+        }
         
         updateStatus('connected');
         renderActiveTab();
     } catch (err) {
-        console.error("Connection error:", err);
+        console.error("Fetch error:", err);
         updateStatus('disconnected');
         diskBadge.classList.add('hidden');
         
-        state.devicesStatus[device.id] = {
-            status: 'offline',
-            message: err.message || 'Offline',
-            storage: null,
-            url: ''
-        };
-        
         showState(emptyState);
         emptyState.querySelector('h3').textContent = "Connection Failed";
-        emptyState.querySelector('p').textContent = err.message || `Could not connect to ${device.name}`;
-        
-        let retryBtn = emptyState.querySelector('.btn-retry');
-        if (!retryBtn) {
-            retryBtn = document.createElement('button');
-            retryBtn.className = "btn btn-primary btn-retry";
-            retryBtn.style.marginTop = "1rem";
-            retryBtn.textContent = "Retry Connection";
-            retryBtn.onclick = () => fetchActiveDeviceFiles();
-            emptyState.appendChild(retryBtn);
-        }
+        emptyState.querySelector('p').textContent = err.message || `Could not fetch files from ${device.name}`;
     }
     updateHeaderSwitcher();
 }
 
-// Filter and Render Media Items based on current Tab
+// Router for navigation panels
 function renderActiveTab() {
     updateHeaderSwitcher();
     
@@ -454,12 +798,10 @@ function renderActiveTab() {
         renderDashboard();
         return;
     }
-    
     if (state.activeTab === 'settings') {
         renderSettingsTab();
         return;
     }
-    
     if (state.activeTab === 'audit') {
         renderAuditTab();
         return;
@@ -487,9 +829,7 @@ function renderActiveTab() {
     if (filteredFiles.length === 0) {
         showState(emptyState);
         emptyState.querySelector('h3').textContent = "No Items Found";
-        emptyState.querySelector('p').textContent = `The category '${state.activeTab}' is currently empty inside Media/`;
-        const rBtn = emptyState.querySelector('.btn-retry');
-        if (rBtn) rBtn.remove();
+        emptyState.querySelector('p').textContent = `The category '${state.activeTab}' is currently empty.`;
         return;
     }
     
@@ -497,7 +837,8 @@ function renderActiveTab() {
     filesGrid.innerHTML = '';
     
     filteredFiles.forEach(file => {
-        const fileUrl = `${state.resolvedUrl}/api/files/download/${encodeURIComponent(file.path)}?token=${encodeURIComponent(state.apiToken)}`;
+        const device = state.devices.find(d => d.id === state.activeDeviceId);
+        const fileUrl = `${state.resolvedUrl}/api/files/download/${encodeURIComponent(file.path)}?drive_id=${encodeURIComponent(state.activeDeviceId)}&token=${encodeURIComponent(device.apiToken)}`;
         const card = document.createElement('div');
         card.className = 'media-card glass';
         
@@ -547,10 +888,10 @@ function getFileIcon(type) {
     return 'file-text';
 }
 
-// Render dynamic settings interface inside main panel
+// Render dynamic settings and account parameters
 function renderSettingsTab() {
-    tabTitle.textContent = "Settings & Devices";
-    tabSubtitle.textContent = "Register and manage your portable pocket NAS network drives";
+    tabTitle.textContent = "Settings & Account";
+    tabSubtitle.textContent = "Register devices, view profile details, or log out of your profile";
     
     showState(filesGrid);
     
@@ -560,16 +901,16 @@ function renderSettingsTab() {
     } else {
         state.devices.forEach(device => {
             devicesListHtml += `
-                <div class="audit-item glass" style="border-radius: 8px; margin-bottom: 0.75rem; padding: 1rem; flex-direction: row; justify-content: space-between; align-items: center; display: flex; font-family: inherit;">
+                <div class="audit-item glass" style="border-radius: 8px; margin-bottom: 0.75rem; padding: 1rem; flex-direction: row; justify-content: space-between; align-items: center; display: flex;">
                     <div>
                         <strong style="color: #fff; font-size: 1rem;">${device.name}</strong>
                         <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem;">
-                            Gist ID: <span style="font-family: monospace;">${device.gistId || 'N/A'}</span>
-                            ${device.serverUrlOverride ? ` | Direct URL: <span style="font-family: monospace;">${device.serverUrlOverride}</span>` : ''}
+                            Drive UUID ID: <span style="font-family: monospace;">${device.id}</span>
+                            ${device.serverUrlOverride ? ` | Direct URL Override: <span style="font-family: monospace;">${device.serverUrlOverride}</span>` : ''}
                         </div>
                     </div>
                     <div>
-                        <button class="btn btn-secondary btn-icon delete-device-btn" data-id="${device.id}" title="Remove Drive" style="border-color: rgba(239, 68, 110, 0.2); color: var(--error); width: 34px; height: 34px;">
+                        <button class="btn btn-secondary btn-icon delete-device-btn" data-id="${device.id}" title="Remove Drive" style="border-color: rgba(239, 68, 110, 0.2); color: var(--error); width: 34px; height: 34px; padding: 0;">
                             <i data-lucide="trash-2" style="width: 16px; height: 16px;"></i>
                         </button>
                     </div>
@@ -579,8 +920,12 @@ function renderSettingsTab() {
     }
     
     filesGrid.innerHTML = `
-        <div class="card glass" style="grid-column: 1 / -1; margin: 0 auto; max-width: 680px; width: 100%; padding: 2rem; border-radius: var(--border-radius);">
-            <h3 style="margin-bottom: 1.25rem;">Registered Devices</h3>
+        <div class="card glass" style="grid-column: 1 / -1; margin: 0 auto; max-width: 680px; width: 100%; padding: 2rem; border-radius: var(--border-radius); display: flex; flex-direction: column;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
+                <h3 style="margin: 0;">Registered Devices</h3>
+                <span class="text-secondary" style="font-size: 0.85rem;">Account: <strong>${state.username}</strong></span>
+            </div>
+            
             <div style="margin-bottom: 2rem; max-height: 250px; overflow-y: auto; padding-right: 0.5rem;">
                 ${devicesListHtml}
             </div>
@@ -593,12 +938,12 @@ function renderSettingsTab() {
                 <input type="text" id="new-device-name" placeholder="e.g. Vault-SSD-1">
             </div>
             <div class="form-group">
-                <label for="new-device-gist">GitHub Gist ID (Auto-Sync)</label>
-                <input type="text" id="new-device-gist" placeholder="Enter Gist ID containing nas_url.json">
+                <label for="new-device-id">Unique Drive ID (from server's config.json)</label>
+                <input type="text" id="new-device-id" placeholder="e.g. disk-uuid-...">
             </div>
             <div class="form-group">
                 <label for="new-device-token">Drive API passcode Token</label>
-                <input type="password" id="new-device-token" placeholder="Enter Security Token passcode">
+                <input type="password" id="new-device-token" placeholder="Enter drive passcode">
             </div>
             
             <div class="form-group url-override-group" style="margin-top: 1rem;">
@@ -613,24 +958,24 @@ function renderSettingsTab() {
                 </div>
             </div>
             
-            <button class="btn btn-primary btn-full" id="btn-add-device" style="margin-top: 1rem;">Add Drive to Network</button>
+            <button class="btn btn-primary btn-full" id="btn-add-device" style="margin-top: 1.5rem; width: 100%;">Add Drive to Network</button>
+            <button class="btn btn-secondary btn-full" id="btn-logout" style="margin-top: 1rem; border-color: rgba(239, 68, 110, 0.2); color: var(--error); width: 100%;">Log Out Account</button>
         </div>
     `;
     
     // Bind deletes
     document.querySelectorAll('.delete-device-btn').forEach(btn => {
-        btn.onclick = () => {
+        btn.onclick = async () => {
             const id = btn.getAttribute('data-id');
             const dev = state.devices.find(d => d.id === id);
             if (dev && confirm(`Are you sure you want to remove '${dev.name}' from your dashboard?`)) {
                 state.devices = state.devices.filter(d => d.id !== id);
-                localStorage.setItem('nas_devices', JSON.stringify(state.devices));
                 if (state.activeDeviceId === id) {
                     state.activeDeviceId = state.devices.length > 0 ? state.devices[0].id : '';
-                    localStorage.setItem('nas_active_device_id', state.activeDeviceId);
                     state.diskInfo = null;
                     diskBadge.classList.add('hidden');
                 }
+                await saveRegistryOnGist();
                 renderSettingsTab();
             }
         };
@@ -643,48 +988,54 @@ function renderSettingsTab() {
         toggleBtn.querySelector('.accordion-arrow').classList.toggle('rotated');
     };
     
-    document.getElementById('btn-add-device').onclick = () => {
+    document.getElementById('btn-add-device').onclick = async () => {
         const name = document.getElementById('new-device-name').value.trim();
-        const gist = document.getElementById('new-device-gist').value.trim();
+        const devId = document.getElementById('new-device-id').value.trim();
         const token = document.getElementById('new-device-token').value.trim();
         const url = document.getElementById('new-device-url').value.trim();
         
-        if (!name) {
-            alert("Please enter a friendly name for this drive.");
-            return;
-        }
-        if (!gist && !url) {
-            alert("Please specify either a Gist ID or a Direct Server URL.");
-            return;
-        }
-        if (!token) {
-            alert("Please enter the API passcode token configured in the drive's config.json.");
+        if (!name || !devId || !token) {
+            alert("Please fill in Drive Name, Unique Drive ID, and API passcode.");
             return;
         }
         
         const newDev = {
-            id: 'device-' + Date.now(),
+            id: devId,
             name: name,
-            gistId: gist,
             apiToken: token,
             serverUrlOverride: url
         };
         
         state.devices.push(newDev);
-        localStorage.setItem('nas_devices', JSON.stringify(state.devices));
         if (!state.activeDeviceId) {
             state.activeDeviceId = newDev.id;
-            localStorage.setItem('nas_active_device_id', newDev.id);
         }
         
+        await saveRegistryOnGist();
         alert(`Drive '${name}' successfully registered!`);
         renderSettingsTab();
+    };
+    
+    document.getElementById('btn-logout').onclick = () => {
+        if (confirm("Log out of your NAS account? All local session state will be cleared.")) {
+            sessionStorage.removeItem('nas_session');
+            state.devices = [];
+            state.gistId = '';
+            state.githubPat = '';
+            state.derivedKey = null;
+            state.activeDeviceId = '';
+            state.resolvedUrl = '';
+            state.files = [];
+            state.diskInfo = null;
+            state.devicesStatus = {};
+            showSetupScreen();
+        }
     };
     
     initIcons();
 }
 
-// Render dynamic audit logs tab
+// Render dynamic audits logging tab
 function renderAuditTab() {
     tabTitle.textContent = "Audit Logs";
     tabSubtitle.textContent = "Browse system actions and file modifications for this drive";
@@ -702,18 +1053,18 @@ function renderAuditTab() {
     document.getElementById('audit-disk-name').textContent = state.diskInfo.disk_name;
     document.getElementById('audit-disk-id').textContent = state.diskInfo.disk_id;
     
-    const total = state.diskInfo.storage.total;
-    const free = state.diskInfo.storage.free;
-    const used = state.diskInfo.storage.used;
+    const total = state.diskInfo.storage ? state.diskInfo.storage.total : 0;
+    const free = state.diskInfo.storage ? state.diskInfo.storage.free : 0;
+    const used = state.diskInfo.storage ? state.diskInfo.storage.used : 0;
     const usagePercent = total > 0 ? ((used / total) * 100).toFixed(1) : 0;
     
-    document.getElementById('audit-disk-storage').textContent = `${formatBytes(used)} / ${formatBytes(total)} (${usagePercent}% used)`;
+    document.getElementById('audit-disk-storage').textContent = total > 0 ? `${formatBytes(used)} / ${formatBytes(total)} (${usagePercent}% used)` : 'N/A';
     document.getElementById('audit-storage-bar').style.width = `${usagePercent}%`;
     
     const listContainer = document.getElementById('audit-list');
     listContainer.innerHTML = '';
     
-    if (state.diskInfo.audit_log.length === 0) {
+    if (!state.diskInfo.audit_log || state.diskInfo.audit_log.length === 0) {
         listContainer.innerHTML = '<li class="audit-item"><span class="audit-item-detail">No audit records found on this drive</span></li>';
         return;
     }
@@ -742,7 +1093,7 @@ function renderAuditTab() {
     });
 }
 
-// Media Click Handler (Opens modals)
+// Media Modals display click handler
 function handleMediaClick(file, fileUrl) {
     if (file.type === 'image') {
         lightboxImage.src = fileUrl;
@@ -754,7 +1105,7 @@ function handleMediaClick(file, fileUrl) {
         videoTitle.textContent = file.name;
         videoDownload.href = fileUrl;
         videoModal.classList.remove('hidden');
-        modalVideo.play().catch(e => console.log("Auto-play blocked or streaming range issue:", e));
+        modalVideo.play().catch(e => console.log("Video playback scrub range info:", e));
     } else {
         const anchor = document.createElement('a');
         anchor.href = fileUrl;
@@ -763,42 +1114,6 @@ function handleMediaClick(file, fileUrl) {
         anchor.click();
         document.body.removeChild(anchor);
     }
-}
-
-// Save configuration credentials helper (for initial setup)
-function saveConfiguration(gist, token, serverUrl) {
-    if (!gist && !serverUrl) {
-        alert("Please enter either a Gist ID or a Direct Server URL to connect.");
-        return;
-    }
-    
-    if (!token) {
-        alert("Please enter the API passcode token.");
-        return;
-    }
-    
-    const defaultDev = {
-        id: 'device-' + Date.now(),
-        name: 'Default-Vault',
-        gistId: gist,
-        apiToken: token,
-        serverUrlOverride: serverUrl
-    };
-    
-    state.devices = [defaultDev];
-    state.activeDeviceId = defaultDev.id;
-    localStorage.setItem('nas_devices', JSON.stringify(state.devices));
-    localStorage.setItem('nas_active_device_id', defaultDev.id);
-    
-    state.activeTab = 'dashboard';
-    document.querySelectorAll('.nav-item').forEach(item => {
-        item.classList.remove('active');
-        if (item.getAttribute('data-tab') === 'dashboard') {
-            item.classList.add('active');
-        }
-    });
-    
-    pingDevices();
 }
 
 // Event Bindings
@@ -811,22 +1126,21 @@ btnRefresh.onclick = () => {
     }
 };
 
-// Setup Screen Bindings
-btnSaveSetup.onclick = () => {
-    const gist = setupGistId.value.trim();
-    const token = setupToken.value.trim();
-    const serverUrl = setupServerUrl.value.trim();
-    saveConfiguration(gist, token, serverUrl);
+btnLoginAccount.onclick = () => {
+    const username = loginUsernameInput.value.trim();
+    const password = loginPasswordInput.value.trim();
+    if (username && password) {
+        loginAccount(username, password);
+    } else {
+        alert("Please enter your Username and Password.");
+    }
 };
 
-// Advanced Section toggle in setup card
-toggleAdvanced.onclick = () => {
-    advancedBody.classList.toggle('hidden');
-    const arrow = toggleAdvanced.querySelector('.accordion-arrow');
-    arrow.classList.toggle('rotated');
+btnRegisterAccount.onclick = () => {
+    registerAccount();
 };
 
-// Modal Close Triggers
+// Modal close binds
 imageModalClose.onclick = () => {
     imageModal.classList.add('hidden');
     lightboxImage.src = '';
@@ -838,12 +1152,10 @@ videoModalClose.onclick = () => {
     modalVideo.src = '';
 };
 
-// Close modal when clicking backdrop
 document.querySelectorAll('.modal-backdrop').forEach(backdrop => {
     backdrop.onclick = (e) => {
         const modal = e.target.closest('.modal');
         modal.classList.add('hidden');
-        
         if (modal.id === 'video-modal') {
             modalVideo.pause();
             modalVideo.src = '';
@@ -853,12 +1165,16 @@ document.querySelectorAll('.modal-backdrop').forEach(backdrop => {
     };
 });
 
-// Tab Switch Binding
+// Sidebar navigation click handler
 document.querySelectorAll('.nav-item').forEach(btn => {
     btn.onclick = () => {
+        if (!state.gistId) {
+            showSetupScreen();
+            return;
+        }
+        
         document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
         btn.classList.add('active');
-        
         state.activeTab = btn.getAttribute('data-tab');
         
         if (state.activeTab === 'settings') {
@@ -871,7 +1187,7 @@ document.querySelectorAll('.nav-item').forEach(btn => {
     };
 });
 
-// Bootstrap Application
+// Boot application
 document.addEventListener('DOMContentLoaded', () => {
     initIcons();
     
@@ -879,8 +1195,16 @@ document.addEventListener('DOMContentLoaded', () => {
         setActiveDevice(e.target.value, state.activeTab);
     };
     
-    if (state.devices.length > 0) {
-        pingDevices();
+    // Check if user session is saved in sessionStorage
+    const sessionRaw = sessionStorage.getItem('nas_session');
+    if (sessionRaw) {
+        try {
+            const session = JSON.parse(sessionRaw);
+            loginAccount(session.username, session.password);
+        } catch (e) {
+            sessionStorage.removeItem('nas_session');
+            showSetupScreen();
+        }
     } else {
         showSetupScreen();
     }
