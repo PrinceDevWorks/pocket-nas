@@ -7,7 +7,8 @@ let state = {
     serverUrlOverride: localStorage.getItem('nas_server_url') || '',
     resolvedUrl: '',
     files: [],
-    activeTab: 'all' // all, images, videos, documents, settings
+    activeTab: 'all', // all, images, videos, documents, audit, settings
+    diskInfo: null
 };
 
 // DOM Elements
@@ -16,6 +17,9 @@ const loadingState = document.getElementById('loading-state');
 const emptyState = document.getElementById('empty-state');
 const setupState = document.getElementById('setup-state');
 const filesGrid = document.getElementById('files-grid');
+const auditContainer = document.getElementById('audit-container');
+const diskBadge = document.getElementById('disk-badge');
+const diskBadgeName = document.getElementById('disk-badge-name');
 
 const tabTitle = document.getElementById('tab-title');
 const tabSubtitle = document.getElementById('tab-subtitle');
@@ -154,6 +158,20 @@ async function fetchFiles() {
         const data = await filesResponse.json();
         state.files = data.files || [];
         
+        // Load disk status & audit logs
+        try {
+            const diskResponse = await fetch(`${state.resolvedUrl}/api/disk/status`, {
+                headers: { 'Authorization': `Bearer ${state.apiToken}` }
+            });
+            if (diskResponse.ok) {
+                state.diskInfo = await diskResponse.json();
+                diskBadgeName.textContent = state.diskInfo.disk_name;
+                diskBadge.classList.remove('hidden');
+            }
+        } catch (e) {
+            console.warn("Could not load disk details:", e);
+        }
+        
         updateStatus('connected');
         renderActiveTab();
         
@@ -185,6 +203,7 @@ function showState(elementToShow) {
     emptyState.classList.add('hidden');
     setupState.classList.add('hidden');
     filesGrid.classList.add('hidden');
+    auditContainer.classList.add('hidden');
     
     elementToShow.classList.remove('hidden');
 }
@@ -202,6 +221,11 @@ function showSetupScreen() {
 function renderActiveTab() {
     if (state.activeTab === 'settings') {
         renderSettingsTab();
+        return;
+    }
+    
+    if (state.activeTab === 'audit') {
+        renderAuditTab();
         return;
     }
     
@@ -338,7 +362,9 @@ function renderSettingsTab() {
             state.apiToken = '';
             state.serverUrlOverride = '';
             state.files = [];
+            state.diskInfo = null;
             state.activeTab = 'all';
+            diskBadge.classList.add('hidden');
             
             // Switch navigation active states back to all
             document.querySelectorAll('.nav-item').forEach(item => {
@@ -484,6 +510,67 @@ document.querySelectorAll('.nav-item').forEach(btn => {
         }
     };
 });
+
+// Render dynamic audit logs tab
+function renderAuditTab() {
+    tabTitle.textContent = "Audit Logs";
+    tabSubtitle.textContent = "Browse system actions and file modifications for this drive";
+    
+    showState(auditContainer);
+    
+    if (!state.diskInfo) {
+        document.getElementById('audit-disk-name').textContent = "Unknown Disk";
+        document.getElementById('audit-disk-id').textContent = "N/A";
+        document.getElementById('audit-disk-storage').textContent = "N/A";
+        document.getElementById('audit-list').innerHTML = '<li class="audit-item"><span class="audit-item-detail">No disk information loaded</span></li>';
+        return;
+    }
+    
+    document.getElementById('audit-disk-name').textContent = state.diskInfo.disk_name;
+    document.getElementById('audit-disk-id').textContent = state.diskInfo.disk_id;
+    
+    // Compute storage usage
+    const total = state.diskInfo.storage.total;
+    const free = state.diskInfo.storage.free;
+    const used = state.diskInfo.storage.used;
+    const usagePercent = total > 0 ? ((used / total) * 100).toFixed(1) : 0;
+    
+    document.getElementById('audit-disk-storage').textContent = `${formatBytes(used)} / ${formatBytes(total)} (${usagePercent}% used)`;
+    document.getElementById('audit-storage-bar').style.width = `${usagePercent}%`;
+    
+    const listContainer = document.getElementById('audit-list');
+    listContainer.innerHTML = '';
+    
+    if (state.diskInfo.audit_log.length === 0) {
+        listContainer.innerHTML = '<li class="audit-item"><span class="audit-item-detail">No audit records found on this drive</span></li>';
+        return;
+    }
+    
+    state.diskInfo.audit_log.forEach(log => {
+        // Log format: TIMESTAMP | DISK_NAME (DISK_ID) | ACTION | DETAIL
+        const parts = log.split(' | ');
+        if (parts.length >= 4) {
+            const time = parts[0];
+            const action = parts[2];
+            const detail = parts.slice(3).join(' | ');
+            
+            const item = document.createElement('li');
+            item.className = 'audit-item';
+            item.innerHTML = `
+                <span class="audit-item-time">${time}</span>
+                <span class="audit-item-action audit-action-${action.toLowerCase()}">${action}</span>
+                <span class="audit-item-detail" title="${detail}">${detail}</span>
+            `;
+            listContainer.appendChild(item);
+        } else {
+            // Raw log line fallback
+            const item = document.createElement('li');
+            item.className = 'audit-item';
+            item.innerHTML = `<span class="audit-item-detail">${log}</span>`;
+            listContainer.appendChild(item);
+        }
+    });
+}
 
 // Bootstrap Application
 document.addEventListener('DOMContentLoaded', () => {

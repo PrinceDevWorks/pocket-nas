@@ -45,6 +45,10 @@
                     <i data-lucide="file-text"></i>
                     <span>Documents</span>
                 </button>
+                <button class="nav-item" data-tab="audit">
+                    <i data-lucide="activity"></i>
+                    <span>Audit Logs</span>
+                </button>
                 <button class="nav-item" data-tab="settings">
                     <i data-lucide="settings"></i>
                     <span>Settings</span>
@@ -54,6 +58,9 @@
             <div class="connection-status" id="status-indicator">
                 <span class="status-dot disconnected"></span>
                 <span class="status-text">Disconnected</span>
+                <div id="disk-badge" class="disk-badge hidden">
+                    <span id="disk-badge-name">-</span>
+                </div>
             </div>
         </aside>
 
@@ -123,6 +130,37 @@
                 <!-- Files Grid -->
                 <div class="files-grid hidden" id="files-grid">
                     <!-- Cards will be dynamically injected here -->
+                </div>
+
+                <!-- Audit Logs View -->
+                <div class="audit-container hidden" id="audit-container">
+                    <div class="card audit-card glass">
+                        <div class="audit-header">
+                            <div class="disk-meta-grid">
+                                <div class="meta-item">
+                                    <span class="meta-label">Disk Name</span>
+                                    <h3 id="audit-disk-name">-</h3>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="meta-label">Disk ID</span>
+                                    <p id="audit-disk-id" class="text-secondary">-</p>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="meta-label">Storage Usage</span>
+                                    <p id="audit-disk-storage" class="text-secondary">-</p>
+                                </div>
+                            </div>
+                            <div class="storage-bar-bg">
+                                <div class="storage-bar-fill" id="audit-storage-bar" style="width: 0%;"></div>
+                            </div>
+                        </div>
+                        <div class="audit-log-wrapper">
+                            <h4>File Modification & Access Logs</h4>
+                            <ul class="audit-list" id="audit-list">
+                                <!-- Log items dynamically injected -->
+                            </ul>
+                        </div>
+                    </div>
                 </div>
             </section>
         </main>
