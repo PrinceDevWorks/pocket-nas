@@ -29,7 +29,11 @@
             </div>
             
             <nav class="sidebar-nav">
-                <button class="nav-item active" data-tab="all">
+                <button class="nav-item active" data-tab="dashboard">
+                    <i data-lucide="layout-dashboard"></i>
+                    <span>Dashboard</span>
+                </button>
+                <button class="nav-item" data-tab="all">
                     <i data-lucide="folder-open"></i>
                     <span>All Files</span>
                 </button>
@@ -69,10 +73,16 @@
             <!-- Header Section -->
             <header class="content-header">
                 <div class="header-info">
-                    <h1 id="tab-title">All Files</h1>
-                    <p id="tab-subtitle" class="text-secondary">Loading files...</p>
+                    <h1 id="tab-title">Dashboard</h1>
+                    <p id="tab-subtitle" class="text-secondary">Overview of your pocket NAS network</p>
                 </div>
                 <div class="header-actions">
+                    <div class="device-switcher-container hidden" id="header-device-switcher">
+                        <i data-lucide="hard-drive" class="switcher-icon" style="width: 16px; height: 16px; margin-right: 0.35rem; color: var(--primary);"></i>
+                        <select id="active-device-select" class="switcher-select">
+                            <!-- Options dynamically loaded -->
+                        </select>
+                    </div>
                     <button class="btn btn-secondary btn-icon" id="btn-refresh" title="Refresh files">
                         <i data-lucide="refresh-cw"></i>
                     </button>
@@ -81,6 +91,25 @@
 
             <!-- File Grid / List Container -->
             <section class="files-view">
+                <!-- Unified Dashboard View -->
+                <div class="dashboard-view" id="dashboard-view">
+                    <div class="dashboard-stats-grid">
+                        <div class="stat-card glass">
+                            <span class="stat-label">Online Devices</span>
+                            <h2 id="stat-online-count">0</h2>
+                        </div>
+                        <div class="stat-card glass">
+                            <span class="stat-label">Total Registered</span>
+                            <h2 id="stat-total-count">0</h2>
+                        </div>
+                    </div>
+                    
+                    <h3 class="dashboard-section-title">Your Storage Drives</h3>
+                    <div class="devices-dashboard-grid" id="devices-dashboard-grid">
+                        <!-- Drive cards injected dynamically -->
+                    </div>
+                </div>
+
                 <!-- Loading State -->
                 <div class="state-container" id="loading-state">
                     <div class="spinner"></div>
