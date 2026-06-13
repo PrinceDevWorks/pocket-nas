@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pocket NAS - Personal Server</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Dynamic Mesh Background Blobs -->
+    <div class="bg-glow bg-glow-1"></div>
+    <div class="bg-glow bg-glow-2"></div>
+    <div class="bg-glow bg-glow-3"></div>
+
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-logo">
+                <div class="logo-icon">
+                    <i data-lucide="hard-drive"></i>
+                </div>
+                <h2>Pocket NAS</h2>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-tab="all">
+                    <i data-lucide="folder-open"></i>
+                    <span>All Files</span>
+                </button>
+                <button class="nav-item" data-tab="images">
+                    <i data-lucide="image"></i>
+                    <span>Photos</span>
+                </button>
+                <button class="nav-item" data-tab="videos">
+                    <i data-lucide="film"></i>
+                    <span>Videos</span>
+                </button>
+                <button class="nav-item" data-tab="documents">
+                    <i data-lucide="file-text"></i>
+                    <span>Documents</span>
+                </button>
+                <button class="nav-item" data-tab="settings">
+                    <i data-lucide="settings"></i>
+                    <span>Settings</span>
+                </button>
+            </nav>
+
+            <div class="connection-status" id="status-indicator">
+                <span class="status-dot disconnected"></span>
+                <span class="status-text">Disconnected</span>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Header Section -->
+            <header class="content-header">
+                <div class="header-info">
+                    <h1 id="tab-title">All Files</h1>
+                    <p id="tab-subtitle" class="text-secondary">Loading files...</p>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-secondary btn-icon" id="btn-refresh" title="Refresh files">
+                        <i data-lucide="refresh-cw"></i>
+                    </button>
+                </div>
+            </header>
+
+            <!-- File Grid / List Container -->
+            <section class="files-view">
+                <!-- Loading State -->
+                <div class="state-container" id="loading-state">
+                    <div class="spinner"></div>
+                    <p>Connecting to NAS...</p>
+                </div>
+
+                <!-- Empty State -->
+                <div class="state-container hidden" id="empty-state">
+                    <i data-lucide="folder" class="state-icon"></i>
+                    <h3>No Files Found</h3>
+                    <p class="text-secondary">Place your photos, videos, or documents inside the NAS 'Media/' folder.</p>
+                </div>
+
+                <!-- Config Setup Required State -->
+                <div class="state-container hidden" id="setup-state">
+                    <div class="card setup-card glass">
+                        <i data-lucide="lock" class="state-icon"></i>
+                        <h3>Authentication Required</h3>
+                        <p class="text-secondary">Please enter your Gist ID and security token to connect to your Pocket NAS.</p>
+                        
+                        <div class="form-group">
+                            <label for="setup-gist-id">GitHub Gist ID</label>
+                            <input type="text" id="setup-gist-id" placeholder="Enter Gist ID containing the URL">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="setup-token">API Token</label>
+                            <input type="password" id="setup-token" placeholder="Enter NAS API Security Token">
+                        </div>
+
+                        <div class="form-group url-override-group">
+                            <div class="accordion-header" id="toggle-advanced">
+                                <span>Advanced: Direct Server URL</span>
+                                <i data-lucide="chevron-down" class="accordion-arrow"></i>
+                            </div>
+                            <div class="accordion-body hidden" id="advanced-body">
+                                <label for="setup-server-url">Direct Server URL (Optional)</label>
+                                <input type="text" id="setup-server-url" placeholder="http://127.0.0.1:8000">
+                                <span class="input-hint">Overrides Gist lookup (useful for local development).</span>
+                            </div>
+                        </div>
+
+                        <button class="btn btn-primary btn-full" id="btn-save-setup">Connect to NAS</button>
+                    </div>
+                </div>
+
+                <!-- Files Grid -->
+                <div class="files-grid hidden" id="files-grid">
+                    <!-- Cards will be dynamically injected here -->
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Media Modals -->
+    <!-- Image Lightbox Modal -->
+    <div class="modal hidden" id="image-modal">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content lightbox-content glass">
+            <button class="modal-close" id="image-modal-close"><i data-lucide="x"></i></button>
+            <div class="lightbox-img-wrapper">
+                <img id="lightbox-image" src="" alt="View Image">
+            </div>
+            <div class="modal-footer">
+                <span class="file-name" id="lightbox-title">Image.jpg</span>
+                <a href="#" class="btn btn-primary" id="lightbox-download" download>
+                    <i data-lucide="download"></i>
+                    <span>Download</span>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Video Player Modal -->
+    <div class="modal hidden" id="video-modal">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content video-modal-content glass">
+            <button class="modal-close" id="video-modal-close"><i data-lucide="x"></i></button>
+            <div class="video-player-wrapper">
+                <video id="modal-video" controls playsinline>
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <div class="modal-footer">
+                <span class="file-name" id="video-title">Video.mp4</span>
+                <a href="#" class="btn btn-primary" id="video-download" download>
+                    <i data-lucide="download"></i>
+                    <span>Download</span>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script Entry -->
+    <script src="app.js"></script>
+</body>
+</html>
